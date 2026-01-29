@@ -6,7 +6,7 @@ on:
       image_name:
         description: 'Docker镜像名称（格式：repository/image:tag）'
         required: true
-        default: 'nginx:latest'
+        default: 'vllm/vllm-openai:nightly'
       release_tag:
         description: 'Release标签（格式：v1.0.0）'
         required: true
@@ -32,6 +32,8 @@ jobs:
           sudo apt-get clean
           # 删除无用的包
           sudo apt-get autoremove --purge -y
+          # 清理旧的内核
+          sudo apt-get remove --purge -y $(dpkg -l | grep 'linux-image-.*-generic' | awk '{print $2}' | grep -v $(uname -r)) || true
           # 清理docker缓存
           sudo docker system prune -a -f --volumes
           # 清理旧的日志文件
@@ -57,30 +59,40 @@ jobs:
           echo "Docker系统状态:"
           docker system df
 
-      - name: Save and split image
+      - name: Save and split image on /mnt
         run: |
           IMAGE_NAME="${{ github.event.inputs.image_name }}"
           SPLIT_SIZE="${{ github.event.inputs.split_size }}G"
           
-          echo "创建专用工作目录..."
-          WORK_DIR="/tmp/docker_image_package_$$"
-          mkdir -p "$WORK_DIR"
+          echo "检查/mnt分区空间..."
+          df -h /mnt
           
-          echo "开始保存镜像..."
-          # 保存镜像到专用目录
+          echo "创建专用工作目录在/mnt..."
+          WORK_DIR="/mnt/docker_image_package_$$"
+          mkdir -p "$WORK_DIR"
+          chmod 777 "$WORK_DIR"
+          
+          echo "工作目录权限:"
+          ls -la "$WORK_DIR"
+          
+          echo "开始保存镜像到/mnt..."
+          # 保存镜像到/mnt分区
           docker save "$IMAGE_NAME" -o "$WORK_DIR/image.tar"
           
           echo "镜像保存完成，文件大小: $(du -h "$WORK_DIR/image.tar")"
           
-          # 检查空间
-          echo "保存后磁盘空间:"
-          df -h /tmp
+          # 检查/mnt空间
+          echo "/mnt分区空间使用情况:"
+          df -h /mnt
           
           echo "开始分割文件，每片 $SPLIT_SIZE..."
           cd "$WORK_DIR"
           
           # 分割文件
           split -b "$SPLIT_SIZE" -d --additional-suffix=.part "image.tar" "image.tar.part"
+          
+          echo "分割完成，分片文件列表:"
+          ls -la image.tar.part*
           
           # 生成校验和
           echo "生成校验和..."
@@ -130,31 +142,43 @@ jobs:
           echo "- 合并顺序由文件名数字序号保证（part00, part01, part02...）" >> README.txt
           echo "- 如果校验失败，请重新下载对应的分片文件" >> README.txt
           
-          # 移动文件到工作目录
+          # 移动文件到工作目录（逐步移动，避免一次性拷贝大文件）
           echo "移动文件到工作目录..."
-          mv image.tar.part* checksums.txt README.txt $GITHUB_WORKSPACE/
+          echo "移动分片文件..."
+          mv image.tar.part* $GITHUB_WORKSPACE/
+          echo "移动校验和文件..."
+          mv checksums.txt $GITHUB_WORKSPACE/
+          echo "移动说明文件..."
+          mv README.txt $GITHUB_WORKSPACE/
           
-          echo "专用目录内容:"
-          ls -la "$WORK_DIR"
+          echo "工作目录内容:"
+          ls -la $GITHUB_WORKSPACE/
           
-          # 清理专用目录（使用sudo确保权限）
-          echo "清理专用工作目录..."
-          sudo rm -rf "$WORK_DIR"
+          # 清理/mnt上的文件
+          echo "清理/mnt上的临时文件..."
+          rm -f "$WORK_DIR/image.tar"
           
           echo "清理完成"
 
-      - name: Create ZIP package
+      - name: Create ZIP package with streaming
         run: |
-          echo "创建ZIP包..."
+          echo "创建ZIP包（使用流式处理）..."
           ZIP_DIR="windows_package_$$"
           mkdir "$ZIP_DIR"
+          
+          echo "复制文件到临时目录..."
           cp image.tar.part* checksums.txt README.txt "$ZIP_DIR/"
-          zip -r docker_image_package.zip "$ZIP_DIR"
+          
+          echo "开始创建ZIP包..."
+          zip -r -s 2g docker_image_package.zip "$ZIP_DIR"
+          
+          echo "清理临时目录..."
           rm -rf "$ZIP_DIR"
           
           echo "ZIP包大小: $(du -h docker_image_package.zip)"
           
           # 检查ZIP包完整性
+          echo "验证ZIP包完整性..."
           unzip -t docker_image_package.zip
 
       - name: Create release
@@ -191,11 +215,15 @@ jobs:
           rm -f checksums.txt 2>/dev/null || true
           rm -f README.txt 2>/dev/null || true
           
-          # 清理docker系统，使用sudo
+          # 清理/mnt上的残留文件
+          sudo rm -rf /mnt/docker_image_package_* 2>/dev/null || true
+          
+          # 清理docker系统
           sudo docker system prune -a -f --volumes
           
           # 再次检查空间
           echo "最终磁盘空间:"
-          df -h
+          df -h /mnt
+          df -h /
           
           echo "清理完成"
