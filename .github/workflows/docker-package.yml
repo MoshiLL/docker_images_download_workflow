@@ -12,9 +12,9 @@ on:
         required: true
         default: 'v'
       split_size:
-        description: '分片大小（单位：G，建议2G）'
+        description: '分片大小（单位：M，建议1900M以避免2GiB限制）'
         required: true
-        default: '2'
+        default: '1900'
 
 jobs:
   package-image:
@@ -76,7 +76,7 @@ jobs:
       - name: Save and split image on /mnt with sudo
         run: |
           IMAGE_NAME="${{ github.event.inputs.image_name }}"
-          SPLIT_SIZE="${{ github.event.inputs.split_size }}G"
+          SPLIT_SIZE="${{ github.event.inputs.split_size }}M"  # 使用MB单位，避免GiB限制
           
           echo "检查/mnt分区空间..."
           df -h /mnt
@@ -123,7 +123,7 @@ jobs:
           echo "=====================" >> README.txt
           echo "" >> README.txt
           echo "原始镜像: $IMAGE_NAME" >> README.txt
-          echo "分片大小: $SPLIT_SIZE" >> README.txt
+          echo "分片大小: $SPLIT_SIZE (确保小于2 GiB = 2048M)" >> README.txt
           echo "分片数量: $PART_COUNT" >> README.txt
           echo "完整文件大小: $(du -h image.tar | cut -f1)" >> README.txt
           echo "" >> README.txt
@@ -156,6 +156,7 @@ jobs:
           echo "- 确保所有分片文件都已下载完整" >> README.txt
           echo "- 合并顺序由文件名数字序号保证（part00, part01, part02...）" >> README.txt
           echo "- 如果校验失败，请重新下载对应的分片文件" >> README.txt
+          echo "- GitHub release文件限制为2 GiB，因此分片大小设置为1900M" >> README.txt
           
           # 移动文件到工作目录（使用sudo确保权限）
           echo "移动文件到工作目录..."
@@ -195,10 +196,15 @@ jobs:
           body: |
             **Docker镜像包信息**
             - 镜像名称: ${{ github.event.inputs.image_name }}
-            - 分片大小: ${{ github.event.inputs.split_size }}GB
+            - 分片大小: ${{ github.event.inputs.split_size }}M (确保小于2 GiB限制)
             - 分片数量: $(ls image.tar.part* 2>/dev/null | wc -l)
             - 完整文件大小: $(du -h image.tar 2>/dev/null | cut -f1 || echo "N/A")
             - 生成时间: $(date '+%Y-%m-%d %H:%M:%S')
+
+            **重要提示**
+            - GitHub release单个文件大小限制为2 GiB (2,147,483,648字节)
+            - 为确保安全，分片大小设置为1900M (1,900,000,000字节)
+            - 每个分片文件都严格小于2 GiB限制
             
             **使用说明**
             1. 从release下载所有 `image.tar.part*` 分片文件
@@ -208,11 +214,6 @@ jobs:
             
             **文件列表**
             $(ls -la image.tar.part* 2>/dev/null || echo "分片文件列表不可用")
-            
-            **重要提示**
-            - 每个分片文件都小于2GB，符合GitHub release限制
-            - 请确保下载所有分片文件
-            - 使用 `sha256sum -c checksums.txt` 验证文件完整性
 
       - name: Final cleanup
         if: always()
