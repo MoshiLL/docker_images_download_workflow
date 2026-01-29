@@ -44,6 +44,20 @@ jobs:
           echo "可用inode:"
           df -i
 
+      - name: Check /mnt permissions
+        run: |
+          echo "检查/mnt目录权限..."
+          ls -la /mnt
+          echo "当前用户: $(whoami)"
+          echo "用户组: $(groups)"
+          
+          # 尝试创建测试目录
+          echo "尝试创建测试目录..."
+          sudo mkdir -p /mnt/test_dir_$$
+          sudo chmod 777 /mnt/test_dir_$$
+          echo "测试目录创建成功，权限设置完成"
+          sudo rm -rf /mnt/test_dir_$$
+
       - name: Set up Docker
         uses: docker/setup-buildx-action@v2
 
@@ -59,7 +73,7 @@ jobs:
           echo "Docker系统状态:"
           docker system df
 
-      - name: Save and split image on /mnt
+      - name: Save and split image on /mnt with sudo
         run: |
           IMAGE_NAME="${{ github.event.inputs.image_name }}"
           SPLIT_SIZE="${{ github.event.inputs.split_size }}G"
@@ -67,10 +81,11 @@ jobs:
           echo "检查/mnt分区空间..."
           df -h /mnt
           
-          echo "创建专用工作目录在/mnt..."
+          echo "创建专用工作目录在/mnt（使用sudo）..."
           WORK_DIR="/mnt/docker_image_package_$$"
-          mkdir -p "$WORK_DIR"
-          chmod 777 "$WORK_DIR"
+          sudo mkdir -p "$WORK_DIR"
+          sudo chmod 777 "$WORK_DIR"
+          sudo chown -R $USER:$USER "$WORK_DIR"
           
           echo "工作目录权限:"
           ls -la "$WORK_DIR"
@@ -142,27 +157,35 @@ jobs:
           echo "- 合并顺序由文件名数字序号保证（part00, part01, part02...）" >> README.txt
           echo "- 如果校验失败，请重新下载对应的分片文件" >> README.txt
           
-          # 移动文件到工作目录（逐步移动，避免一次性拷贝大文件）
+          # 移动文件到工作目录（使用sudo确保权限）
           echo "移动文件到工作目录..."
           echo "移动分片文件..."
-          mv image.tar.part* $GITHUB_WORKSPACE/
+          sudo mv image.tar.part* $GITHUB_WORKSPACE/
+          sudo chown $USER:$USER $GITHUB_WORKSPACE/image.tar.part*
+          
           echo "移动校验和文件..."
-          mv checksums.txt $GITHUB_WORKSPACE/
+          sudo mv checksums.txt $GITHUB_WORKSPACE/
+          sudo chown $USER:$USER $GITHUB_WORKSPACE/checksums.txt
+          
           echo "移动说明文件..."
-          mv README.txt $GITHUB_WORKSPACE/
+          sudo mv README.txt $GITHUB_WORKSPACE/
+          sudo chown $USER:$USER $GITHUB_WORKSPACE/README.txt
           
           echo "工作目录内容:"
           ls -la $GITHUB_WORKSPACE/
           
           # 清理/mnt上的文件
           echo "清理/mnt上的临时文件..."
-          rm -f "$WORK_DIR/image.tar"
+          sudo rm -f "$WORK_DIR/image.tar"
+          
+          echo "清理/mnt工作目录..."
+          sudo rm -rf "$WORK_DIR"
           
           echo "清理完成"
 
-      - name: Create ZIP package with streaming
+      - name: Create ZIP package
         run: |
-          echo "创建ZIP包（使用流式处理）..."
+          echo "创建ZIP包..."
           ZIP_DIR="windows_package_$$"
           mkdir "$ZIP_DIR"
           
@@ -170,7 +193,7 @@ jobs:
           cp image.tar.part* checksums.txt README.txt "$ZIP_DIR/"
           
           echo "开始创建ZIP包..."
-          zip -r -s 2g docker_image_package.zip "$ZIP_DIR"
+          zip -r docker_image_package.zip "$ZIP_DIR"
           
           echo "清理临时目录..."
           rm -rf "$ZIP_DIR"
