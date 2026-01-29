@@ -73,6 +73,26 @@ jobs:
           echo "Docker系统状态:"
           docker system df
 
+      - name: Configure Docker to use /mnt for temporary files
+        run: |
+          echo "配置Docker使用/mnt作为临时目录..."
+          
+          # 创建Docker临时目录
+          sudo mkdir -p /mnt/docker_tmp
+          sudo chmod 777 /mnt/docker_tmp
+          
+          # 设置环境变量，强制Docker使用/mnt
+          echo "DOCKER_TMPDIR=/mnt/docker_tmp" >> $GITHUB_ENV
+          echo "TMPDIR=/mnt/docker_tmp" >> $GITHUB_ENV
+          echo "TEMP=/mnt/docker_tmp" >> $GITHUB_ENV
+          echo "TMP=/mnt/docker_tmp" >> $GITHUB_ENV
+          
+          echo "环境变量设置完成:"
+          env | grep -E "(DOCKER_TMPDIR|TMPDIR|TEMP|TMP)"
+          
+          # 验证目录权限
+          ls -la /mnt/docker_tmp
+
       - name: Save and split image on /mnt with sudo
         run: |
           IMAGE_NAME="${{ github.event.inputs.image_name }}"
@@ -90,9 +110,27 @@ jobs:
           echo "工作目录权限:"
           ls -la "$WORK_DIR"
           
-          echo "开始保存镜像到/mnt..."
+          echo "开始保存镜像到/mnt（使用Docker临时目录）..."
           # 保存镜像到/mnt分区
-          docker save "$IMAGE_NAME" -o "$WORK_DIR/image.tar"
+          echo "当前环境变量:"
+          env | grep -E "(DOCKER_TMPDIR|TMPDIR|TEMP|TMP)"
+          
+          echo "Docker临时目录空间:"
+          df -h /mnt/docker_tmp
+          
+          # 关键：直接保存到/mnt，避免临时文件问题
+          docker save "$IMAGE_NAME" -o "$WORK_DIR/image.tar" || {
+            echo "第一次保存失败，尝试使用dd命令分块保存..."
+            # 备选方案：分块保存
+            docker create --name temp_container "$IMAGE_NAME"
+            CID=$(docker ps -a -f name=temp_container --format "{{.ID}}")
+            
+            echo "创建临时容器: $CID"
+            
+            # 分块导出
+            docker export "$CID" | dd of="$WORK_DIR/image.tar" bs=1M
+            docker rm -f "$CID"
+          }
           
           echo "镜像保存完成，文件大小: $(du -h "$WORK_DIR/image.tar")"
           
@@ -181,6 +219,7 @@ jobs:
           
           echo "清理/mnt工作目录..."
           sudo rm -rf "$WORK_DIR"
+          sudo rm -rf /mnt/docker_tmp
           
           echo "清理完成"
 
@@ -205,6 +244,7 @@ jobs:
             - GitHub release单个文件大小限制为2 GiB (2,147,483,648字节)
             - 为确保安全，分片大小设置为1900M (1,900,000,000字节)
             - 每个分片文件都严格小于2 GiB限制
+            - Docker临时文件已配置使用/mnt分区，避免空间不足
             
             **使用说明**
             1. 从release下载所有 `image.tar.part*` 分片文件
@@ -226,6 +266,7 @@ jobs:
           
           # 清理/mnt上的残留文件
           sudo rm -rf /mnt/docker_image_package_* 2>/dev/null || true
+          sudo rm -rf /mnt/docker_tmp 2>/dev/null || true
           
           # 清理docker系统
           sudo docker system prune -a -f --volumes
