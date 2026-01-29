@@ -32,13 +32,10 @@ jobs:
           sudo apt-get clean
           # 删除无用的包
           sudo apt-get autoremove --purge -y
-          # 清理旧的内核
-          sudo apt-get remove --purge -y $(dpkg -l | grep 'linux-image-.*-generic' | awk '{print $2}' | grep -v $(uname -r))
           # 清理docker缓存
-          docker system prune -a -f --volumes
-          # 清理临时文件
-          rm -rf /tmp/*
-          rm -rf ~/*
+          sudo docker system prune -a -f --volumes
+          # 清理旧的日志文件
+          sudo journalctl --vacuum-time=1s
           
           echo "清理后磁盘空间:"
           df -h
@@ -51,39 +48,38 @@ jobs:
       - name: Pull Docker image
         run: |
           echo "正在下载镜像: ${{ github.event.inputs.image_name }}"
-          # 先清理docker系统
-          docker system prune -f
-          
           # 拉取镜像
           docker pull ${{ github.event.inputs.image_name }}
           
           echo "镜像信息:"
           docker images
           
-          echo "系统状态:"
-          df -h /var/lib/docker
+          echo "Docker系统状态:"
+          docker system df
 
       - name: Save and split image
         run: |
           IMAGE_NAME="${{ github.event.inputs.image_name }}"
           SPLIT_SIZE="${{ github.event.inputs.split_size }}G"
           
-          echo "开始保存镜像到临时位置..."
-          # 使用/tmp目录，通常有更多空间
-          DOCKER_IMAGE_PATH="/tmp/image.tar"
+          echo "创建专用工作目录..."
+          WORK_DIR="/tmp/docker_image_package_$$"
+          mkdir -p "$WORK_DIR"
           
-          # 保存镜像
-          docker save "$IMAGE_NAME" -o "$DOCKER_IMAGE_PATH"
+          echo "开始保存镜像..."
+          # 保存镜像到专用目录
+          docker save "$IMAGE_NAME" -o "$WORK_DIR/image.tar"
           
-          echo "镜像保存完成，文件大小: $(du -h "$DOCKER_IMAGE_PATH")"
+          echo "镜像保存完成，文件大小: $(du -h "$WORK_DIR/image.tar")"
           
           # 检查空间
           echo "保存后磁盘空间:"
           df -h /tmp
           
-          # 分割文件
           echo "开始分割文件，每片 $SPLIT_SIZE..."
-          cd /tmp
+          cd "$WORK_DIR"
+          
+          # 分割文件
           split -b "$SPLIT_SIZE" -d --additional-suffix=.part "image.tar" "image.tar.part"
           
           # 生成校验和
@@ -103,24 +99,63 @@ jobs:
           echo "分片大小: $SPLIT_SIZE" >> README.txt
           echo "分片数量: $PART_COUNT" >> README.txt
           echo "完整文件大小: $(du -h image.tar | cut -f1)" >> README.txt
+          echo "" >> README.txt
+          echo "校验和文件说明:" >> README.txt
+          echo "- 前$PART_COUNT行是各个分片的SHA256校验和" >> README.txt
+          echo "- 最后一行是完整image.tar文件的SHA256校验和" >> README.txt
+          echo "" >> README.txt
+          echo "使用步骤:" >> README.txt
+          echo "1. 下载所有文件（image.tar.part*、checksums.txt、README.txt）" >> README.txt
+          echo "2. 将所有文件打包成zip（在Windows上）" >> README.txt
+          echo "3. 上传zip文件到Linux服务器" >> README.txt
+          echo "4. 在Linux服务器上执行以下命令:" >> README.txt
+          echo "" >> README.txt
+          echo "# 解压文件" >> README.txt
+          echo "unzip package.zip" >> README.txt
+          echo "" >> README.txt
+          echo "# 合并分片" >> README.txt
+          echo "cat image.tar.part* > image.tar" >> README.txt
+          echo "" >> README.txt
+          echo "# 验证完整性" >> README.txt
+          echo "sha256sum -c checksums.txt --ignore-missing" >> README.txt
+          echo "" >> README.txt
+          echo "# 如果验证通过，加载Docker镜像" >> README.txt
+          echo "docker load -i image.tar" >> README.txt
+          echo "" >> README.txt
+          echo "# 清理临时文件" >> README.txt
+          echo "rm image.tar.part* image.tar checksums.txt README.txt" >> README.txt
+          echo "" >> README.txt
+          echo "注意:" >> README.txt
+          echo "- 确保所有分片文件都已下载完整" >> README.txt
+          echo "- 合并顺序由文件名数字序号保证（part00, part01, part02...）" >> README.txt
+          echo "- 如果校验失败，请重新下载对应的分片文件" >> README.txt
           
           # 移动文件到工作目录
           echo "移动文件到工作目录..."
           mv image.tar.part* checksums.txt README.txt $GITHUB_WORKSPACE/
           
-          # 清理/tmp
-          rm -f /tmp/image.tar
+          echo "专用目录内容:"
+          ls -la "$WORK_DIR"
+          
+          # 清理专用目录（使用sudo确保权限）
+          echo "清理专用工作目录..."
+          sudo rm -rf "$WORK_DIR"
+          
           echo "清理完成"
 
       - name: Create ZIP package
         run: |
           echo "创建ZIP包..."
-          mkdir windows_package
-          cp image.tar.part* checksums.txt README.txt windows_package/
-          zip -r docker_image_package.zip windows_package/
-          rm -rf windows_package
+          ZIP_DIR="windows_package_$$"
+          mkdir "$ZIP_DIR"
+          cp image.tar.part* checksums.txt README.txt "$ZIP_DIR/"
+          zip -r docker_image_package.zip "$ZIP_DIR"
+          rm -rf "$ZIP_DIR"
           
           echo "ZIP包大小: $(du -h docker_image_package.zip)"
+          
+          # 检查ZIP包完整性
+          unzip -t docker_image_package.zip
 
       - name: Create release
         uses: softprops/action-gh-release@v1
@@ -139,15 +174,28 @@ jobs:
             - 完整文件大小: $(du -h image.tar 2>/dev/null | cut -f1 || echo "N/A")
             - 生成时间: $(date '+%Y-%m-%d %H:%M:%S')
             
-            **注意**: 由于GitHub Actions存储空间限制，大型镜像建议使用较小的分片大小或考虑其他方案。
+            **使用说明**
+            1. 下载 `docker_image_package.zip` 文件
+            2. 解压后按照 `README.txt` 中的说明进行操作
+            
+            **完整性验证**
+            所有文件都包含SHA256校验和，请在使用前验证文件完整性。
 
-      - name: Cleanup
+      - name: Final cleanup
         if: always()
         run: |
           echo "最终清理..."
-          rm -f docker_image_package.zip
-          rm -f image.tar.part*
-          rm -f checksums.txt
-          rm -f README.txt
-          docker system prune -a -f --volumes
+          # 只清理我们创建的文件
+          rm -f docker_image_package.zip 2>/dev/null || true
+          rm -f image.tar.part* 2>/dev/null || true
+          rm -f checksums.txt 2>/dev/null || true
+          rm -f README.txt 2>/dev/null || true
+          
+          # 清理docker系统，使用sudo
+          sudo docker system prune -a -f --volumes
+          
+          # 再次检查空间
+          echo "最终磁盘空间:"
+          df -h
+          
           echo "清理完成"
