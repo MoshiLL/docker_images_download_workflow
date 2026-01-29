@@ -132,18 +132,18 @@ jobs:
           echo "- 最后一行是完整image.tar文件的SHA256校验和" >> README.txt
           echo "" >> README.txt
           echo "使用步骤:" >> README.txt
-          echo "1. 下载所有文件（image.tar.part*、checksums.txt、README.txt）" >> README.txt
-          echo "2. 将所有文件打包成zip（在Windows上）" >> README.txt
-          echo "3. 上传zip文件到Linux服务器" >> README.txt
+          echo "1. 从GitHub release下载所有文件（image.tar.part*、checksums.txt、README.txt）" >> README.txt
+          echo "2. 在Windows上将所有下载的文件打包成ZIP压缩包" >> README.txt
+          echo "3. 将ZIP压缩包上传到Linux服务器" >> README.txt
           echo "4. 在Linux服务器上执行以下命令:" >> README.txt
           echo "" >> README.txt
-          echo "# 解压文件" >> README.txt
+          echo "# 解压ZIP文件" >> README.txt
           echo "unzip package.zip" >> README.txt
           echo "" >> README.txt
-          echo "# 合并分片" >> README.txt
+          echo "# 合并分片文件" >> README.txt
           echo "cat image.tar.part* > image.tar" >> README.txt
           echo "" >> README.txt
-          echo "# 验证完整性" >> README.txt
+          echo "# 验证文件完整性" >> README.txt
           echo "sha256sum -c checksums.txt --ignore-missing" >> README.txt
           echo "" >> README.txt
           echo "# 如果验证通过，加载Docker镜像" >> README.txt
@@ -183,32 +183,11 @@ jobs:
           
           echo "清理完成"
 
-      - name: Create ZIP package
-        run: |
-          echo "创建ZIP包..."
-          ZIP_DIR="windows_package_$$"
-          mkdir "$ZIP_DIR"
-          
-          echo "复制文件到临时目录..."
-          cp image.tar.part* checksums.txt README.txt "$ZIP_DIR/"
-          
-          echo "开始创建ZIP包..."
-          zip -r docker_image_package.zip "$ZIP_DIR"
-          
-          echo "清理临时目录..."
-          rm -rf "$ZIP_DIR"
-          
-          echo "ZIP包大小: $(du -h docker_image_package.zip)"
-          
-          # 检查ZIP包完整性
-          echo "验证ZIP包完整性..."
-          unzip -t docker_image_package.zip
-
-      - name: Create release
+      - name: Create release with individual files
         uses: softprops/action-gh-release@v1
         with:
           files: |
-            docker_image_package.zip
+            image.tar.part*
             checksums.txt
             README.txt
           tag_name: ${{ github.event.inputs.release_tag }}${{ github.run_number }}
@@ -222,18 +201,24 @@ jobs:
             - 生成时间: $(date '+%Y-%m-%d %H:%M:%S')
             
             **使用说明**
-            1. 下载 `docker_image_package.zip` 文件
-            2. 解压后按照 `README.txt` 中的说明进行操作
+            1. 从release下载所有 `image.tar.part*` 分片文件
+            2. 下载 `checksums.txt` 和 `README.txt`
+            3. 在Windows上将所有文件打包成ZIP
+            4. 上传到Linux服务器并按照README说明操作
             
-            **完整性验证**
-            所有文件都包含SHA256校验和，请在使用前验证文件完整性。
+            **文件列表**
+            $(ls -la image.tar.part* 2>/dev/null || echo "分片文件列表不可用")
+            
+            **重要提示**
+            - 每个分片文件都小于2GB，符合GitHub release限制
+            - 请确保下载所有分片文件
+            - 使用 `sha256sum -c checksums.txt` 验证文件完整性
 
       - name: Final cleanup
         if: always()
         run: |
           echo "最终清理..."
           # 只清理我们创建的文件
-          rm -f docker_image_package.zip 2>/dev/null || true
           rm -f image.tar.part* 2>/dev/null || true
           rm -f checksums.txt 2>/dev/null || true
           rm -f README.txt 2>/dev/null || true
