@@ -38,6 +38,50 @@ jobs:
           sudo docker system prune -a -f --volumes
           # 清理旧的日志文件
           sudo journalctl --vacuum-time=1s
+
+          # 清理/mnt确保有足够空间
+          sudo rm -rf /mnt/* 2>/dev/null || true
+          sudo mkdir -p /mnt/docker
+          sudo mkdir -p /mnt/docker_tmp
+          sudo chmod 777 /mnt/docker /mnt/docker_tmp
+
+          # 停止Docker服务
+          echo "停止Docker服务..."
+          sudo systemctl stop docker || true
+
+          # 备份原始Docker配置
+          echo "备份原始Docker配置..."
+          sudo mkdir -p /etc/docker/backup
+          sudo cp -r /var/lib/docker/* /etc/docker/backup/ 2>/dev/null || true
+
+          # 重新配置Docker使用/mnt
+          echo "重新配置Docker使用/mnt分区..."
+          sudo rm -rf /var/lib/docker 2>/dev/null || true
+          sudo ln -s /mnt/docker /var/lib/docker
+
+          # 创建新的Docker数据目录
+          sudo mkdir -p /mnt/docker
+          sudo chown -R root:root /mnt/docker
+          sudo chmod 700 /mnt/docker
+
+          # 重启Docker服务
+          echo "重启Docker服务..."
+          sudo systemctl start docker
+
+          # 验证Docker配置
+          echo "验证Docker配置..."
+          docker info
+          echo "Docker根目录: $(docker info | grep 'Docker Root Dir')"
+
+          # 设置环境变量作为双重保险
+          echo "DOCKER_TMPDIR=/mnt/docker_tmp" >> $GITHUB_ENV
+          echo "TMPDIR=/mnt/docker_tmp" >> $GITHUB_ENV
+          echo "TEMP=/mnt/docker_tmp" >> $GITHUB_ENV
+          echo "TMP=/mnt/docker_tmp" >> $GITHUB_ENV
+          echo "环境变量设置完成:"
+          env | grep -E "(DOCKER_TMPDIR|TMPDIR|TEMP|TMP)"
+          # 验证目录权限
+          ls -la /mnt/docker_tmp
           
           echo "清理后磁盘空间:"
           df -h
@@ -73,30 +117,10 @@ jobs:
           echo "Docker系统状态:"
           docker system df
 
-      - name: Configure Docker to use /mnt for temporary files
-        run: |
-          echo "配置Docker使用/mnt作为临时目录..."
-          
-          # 创建Docker临时目录
-          sudo mkdir -p /mnt/docker_tmp
-          sudo chmod 777 /mnt/docker_tmp
-          
-          # 设置环境变量，强制Docker使用/mnt
-          echo "DOCKER_TMPDIR=/mnt/docker_tmp" >> $GITHUB_ENV
-          echo "TMPDIR=/mnt/docker_tmp" >> $GITHUB_ENV
-          echo "TEMP=/mnt/docker_tmp" >> $GITHUB_ENV
-          echo "TMP=/mnt/docker_tmp" >> $GITHUB_ENV
-          
-          echo "环境变量设置完成:"
-          env | grep -E "(DOCKER_TMPDIR|TMPDIR|TEMP|TMP)"
-          
-          # 验证目录权限
-          ls -la /mnt/docker_tmp
-
       - name: Save and split image on /mnt with sudo
         run: |
           IMAGE_NAME="${{ github.event.inputs.image_name }}"
-          SPLIT_SIZE="${{ github.event.inputs.split_size }}M"  # 使用MB单位，避免GiB限制
+          SPLIT_SIZE="${{ github.event.inputs.split_size }}M" 
           
           echo "检查/mnt分区空间..."
           df -h /mnt
@@ -110,29 +134,42 @@ jobs:
           echo "工作目录权限:"
           ls -la "$WORK_DIR"
           
-          echo "开始保存镜像到/mnt（使用Docker临时目录）..."
+          echo "使用可靠方法保存镜像（docker export + dd）..."
           # 保存镜像到/mnt分区
           echo "当前环境变量:"
           env | grep -E "(DOCKER_TMPDIR|TMPDIR|TEMP|TMP)"
           
           echo "Docker临时目录空间:"
           df -h /mnt/docker_tmp
+
+          # 方法1: 直接创建容器并导出（最可靠）
+          echo "方法1: 创建临时容器并导出..."
+          CONTAINER_NAME="temp_container_$$"
+          docker create --name "$CONTAINER_NAME" "$IMAGE_NAME"
           
-          # 关键：直接保存到/mnt，避免临时文件问题
-          docker save "$IMAGE_NAME" -o "$WORK_DIR/image.tar" || {
-            echo "第一次保存失败，尝试使用dd命令分块保存..."
-            # 备选方案：分块保存
-            docker create --name temp_container "$IMAGE_NAME"
-            CID=$(docker ps -a -f name=temp_container --format "{{.ID}}")
-            
-            echo "创建临时容器: $CID"
-            
-            # 分块导出
-            docker export "$CID" | dd of="$WORK_DIR/image.tar" bs=1M
-            docker rm -f "$CID"
-          }
+          echo "容器创建成功，开始导出..."
+          docker export "$CONTAINER_NAME" | dd of="$WORK_DIR/image.tar" bs=1M status=progress
           
-          echo "镜像保存完成，文件大小: $(du -h "$WORK_DIR/image.tar")"
+          echo "停止并删除临时容器..."
+          docker rm -f "$CONTAINER_NAME"
+          
+          echo "镜像导出完成，文件大小: $(du -h "$WORK_DIR/image.tar")"
+          
+          # 验证文件完整性
+          echo "验证镜像文件完整性..."
+          if [ ! -s "$WORK_DIR/image.tar" ]; then
+            echo "❌ 导出文件为空，尝试备选方法..."
+            
+            echo "方法2: 使用docker save（现在Docker已配置在/mnt）..."
+            docker save "$IMAGE_NAME" -o "$WORK_DIR/image.tar"
+            
+            if [ ! -s "$WORK_DIR/image.tar" ]; then
+              echo "❌ 两种方法都失败，检查Docker状态..."
+              docker info
+              docker system df
+              exit 1
+            fi
+          fi
           
           # 检查/mnt空间
           echo "/mnt分区空间使用情况:"
@@ -208,18 +245,13 @@ jobs:
           
           # 移动文件到工作目录（使用sudo确保权限）
           echo "移动文件到工作目录..."
-          echo "移动分片文件..."
           sudo mv image.tar.part* $GITHUB_WORKSPACE/
           sudo mv checksums.txt $GITHUB_WORKSPACE/
           sudo mv README.txt $GITHUB_WORKSPACE/
           sudo chown $USER:$USER $GITHUB_WORKSPACE/image.tar.part*
           
-          echo "移动校验和文件..."
-          sudo mv checksums.txt $GITHUB_WORKSPACE/
           sudo chown $USER:$USER $GITHUB_WORKSPACE/checksums.txt
           
-          echo "移动说明文件..."
-          sudo mv README.txt $GITHUB_WORKSPACE/
           sudo chown $USER:$USER $GITHUB_WORKSPACE/README.txt
           
           echo "工作目录内容:"
@@ -356,23 +388,44 @@ jobs:
           echo "🎉 所有文件上传成功！"
           echo "Release URL: https://github.com/$REPO_FULL_NAME/releases/tag/$RELEASE_TAG"
 
-      - name: Final cleanup
+      - name: Final cleanup and restore Docker
         if: always()
         run: |
-          echo "最终清理..."
-          # 只清理我们创建的文件
+          echo "最终清理和恢复Docker配置..."
+          
+          # 清理工作文件
           rm -f image.tar.part* 2>/dev/null || true
           rm -f checksums.txt 2>/dev/null || true
           rm -f README.txt 2>/dev/null || true
           
-          # 清理/mnt上的残留文件
+          # 恢复原始Docker配置
+          echo "恢复原始Docker配置..."
+          sudo systemctl stop docker || true
+          
+          # 移除符号链接
+          sudo rm -f /var/lib/docker
+          
+          # 恢复原始数据（如果存在）
+          if [ -d "/etc/docker/backup" ] && [ "$(ls -A /etc/docker/backup 2>/dev/null)" ]; then
+            echo "恢复原始Docker数据..."
+            sudo mkdir -p /var/lib/docker
+            sudo cp -r /etc/docker/backup/* /var/lib/docker/
+            sudo chown -R root:root /var/lib/docker
+            sudo chmod 700 /var/lib/docker
+          fi
+          
+          # 重启Docker
+          sudo systemctl start docker || true
+          
+          # 清理临时目录
           sudo rm -rf /mnt/docker_image_package_* 2>/dev/null || true
           sudo rm -rf /mnt/docker_tmp 2>/dev/null || true
+          sudo rm -rf /etc/docker/backup 2>/dev/null || true
           
           # 清理docker系统
           sudo docker system prune -a -f --volumes
           
-          # 再次检查空间
+          # 检查空间
           echo "最终磁盘空间:"
           df -h /mnt
           df -h /
