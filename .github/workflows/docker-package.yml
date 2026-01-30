@@ -277,116 +277,54 @@ jobs:
           RELEASE_NAME="Docker Image Package ${{ github.event.inputs.image_name }} ($RELEASE_TAG)"
           REPO_FULL_NAME="$GITHUB_REPOSITORY"
           
-          echo "创建release: $RELEASE_TAG"
+          # 创建 release
           RELEASE_RESPONSE=$(curl -s -X POST \
             -H "Authorization: token $GITHUB_TOKEN" \
             -H "Content-Type: application/json" \
-            -d "{\"tag_name\":\"$RELEASE_TAG\",\"name\":\"$RELEASE_NAME\",\"body\":\"**Docker镜像包信息**\\n- 镜像名称: ${{ github.event.inputs.image_name }}\\n- 分片大小: ${{ github.event.inputs.split_size }}M\\n- 生成时间: $(date '+%Y-%m-%d %H:%M:%S')\"}" \
+            -d "{\"tag_name\":\"$RELEASE_TAG\",\"name\":\"$RELEASE_NAME\",\"body\":\"镜像: ${{ github.event.inputs.image_name }}\\n分片: ${{ github.event.inputs.split_size }}M\"}" \
             "https://api.github.com/repos/$REPO_FULL_NAME/releases")
           
-          RELEASE_ID=$(echo "$RELEASE_RESPONSE" | jq -r '.id')
           UPLOAD_URL=$(echo "$RELEASE_RESPONSE" | jq -r '.upload_url' | cut -d'{' -f1)
-          
-          echo "Release ID: $RELEASE_ID"
           echo "Upload URL: $UPLOAD_URL"
           
-          # 分批上传文件，每批3个文件
+          # 准备文件列表
           PART_FILES=($(ls image.tar.part* 2>/dev/null))
           CHECKSUM_FILE="checksums.txt"
           README_FILE="README.txt"
           
-          echo "需要上传的文件列表:"
-          echo "分片文件: ${PART_FILES[@]}"
-          echo "校验和文件: $CHECKSUM_FILE"
-          echo "说明文件: $README_FILE"
-          
-          echo "分批上传分片文件（每批3个）..."
-          BATCH_SIZE=3
+          echo "分批上传分片文件（每批2个，避免超时）..."
+          BATCH_SIZE=2
           for ((i=0; i<${#PART_FILES[@]}; i+=BATCH_SIZE)); do
-            echo "上传批次 $(($i/$BATCH_SIZE + 1)): 文件 ${PART_FILES[@]:$i:$BATCH_SIZE}"
-            
+            echo "上传批次 $(($i/$BATCH_SIZE + 1))..."
             for file in "${PART_FILES[@]:$i:$BATCH_SIZE}"; do
               FILENAME=$(basename "$file")
-              echo "⬆️ 上传 $FILENAME (尝试1)..."
+              echo "⬆️ 上传 $FILENAME ..."
               
-              # 带重试机制的上传
-              MAX_RETRIES=3
-              RETRY_COUNT=0
-              SUCCESS=false
-              
-              while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-                RESPONSE=$(curl -s -X POST \
-                  -H "Authorization: token $GITHUB_TOKEN" \
-                  -H "Content-Type: application/octet-stream" \
-                  --data-binary @"$file" \
-                  "$UPLOAD_URL?name=$FILENAME")
-                
-                if echo "$RESPONSE" | jq -e '.id' >/dev/null 2>&1; then
-                  echo "✅ $FILENAME 上传成功"
-                  SUCCESS=true
-                  break
-                else
-                  RETRY_COUNT=$((RETRY_COUNT + 1))
-                  echo "❌ $FILENAME 上传失败 (尝试 $RETRY_COUNT/$MAX_RETRIES)"
-                  echo "错误信息: $(echo "$RESPONSE" | jq -r '.message // .error // "未知错误"')"
-                  
-                  if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
-                    echo "等待5秒后重试..."
-                    sleep 5
-                  fi
-                fi
-              done
-              
-              if [ "$SUCCESS" = "false" ]; then
-                echo "❌ $FILENAME 上传失败，已达到最大重试次数"
-                exit 1
-              fi
-            done
-            
-            echo "批次 $(($i/$BATCH_SIZE + 1)) 上传完成，等待10秒..."
-            sleep 10
-          done
-          
-          echo "上传校验和文件和说明文件..."
-          for file in "$CHECKSUM_FILE" "$README_FILE"; do
-            FILENAME=$(basename "$file")
-            echo "⬆️ 上传 $FILENAME..."
-            
-            MAX_RETRIES=3
-            RETRY_COUNT=0
-            SUCCESS=false
-            
-            while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-              RESPONSE=$(curl -s -X POST \
+              # ✅ 关键修改：使用 --upload-file 而不是 --data-binary
+              curl -f -X POST \
                 -H "Authorization: token $GITHUB_TOKEN" \
                 -H "Content-Type: application/octet-stream" \
-                --data-binary @"$file" \
-                "$UPLOAD_URL?name=$FILENAME")
+                --upload-file "$file" \
+                "$UPLOAD_URL?name=$FILENAME" > /dev/null
               
-              if echo "$RESPONSE" | jq -e '.id' >/dev/null 2>&1; then
-                echo "✅ $FILENAME 上传成功"
-                SUCCESS=true
-                break
-              else
-                RETRY_COUNT=$((RETRY_COUNT + 1))
-                echo "❌ $FILENAME 上传失败 (尝试 $RETRY_COUNT/$MAX_RETRIES)"
-                echo "错误信息: $(echo "$RESPONSE" | jq -r '.message // .error // "未知错误"')"
-                
-                if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
-                  echo "等待5秒后重试..."
-                  sleep 5
-                fi
-              fi
+              echo "✅ $FILENAME 上传成功"
+              sleep 3
             done
-            
-            if [ "$SUCCESS" = "false" ]; then
-              echo "❌ $FILENAME 上传失败，已达到最大重试次数"
-              exit 1
-            fi
+            sleep 5
+          done
+          
+          # 上传小文件
+          for file in "$CHECKSUM_FILE" "$README_FILE"; do
+            echo "⬆️ 上传 $(basename "$file") ..."
+            curl -f -X POST \
+              -H "Authorization: token $GITHUB_TOKEN" \
+              -H "Content-Type: application/octet-stream" \
+              --upload-file "$file" \
+              "$UPLOAD_URL?name=$(basename "$file")" > /dev/null
+            echo "✅ $(basename "$file") 上传成功"
           done
           
           echo "🎉 所有文件上传成功！"
-          echo "Release URL: https://github.com/$REPO_FULL_NAME/releases/tag/$RELEASE_TAG"
 
       - name: Final cleanup and restore Docker
         if: always()
