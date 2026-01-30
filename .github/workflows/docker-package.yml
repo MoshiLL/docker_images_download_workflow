@@ -357,7 +357,7 @@ jobs:
           
           # 清理临时目录
           sudo rm -rf /mnt/docker_image_package_* 2>/dev/null || true
-          sudo rm -rf /mnt/docker_tmp 2>/dev/null || true
+          # sudo rm -rf /mnt/docker_tmp 2>/dev/null || true
           sudo rm -rf /etc/docker/backup 2>/dev/null || true
           
           # 清理docker系统
