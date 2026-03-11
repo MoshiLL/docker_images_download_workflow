@@ -238,7 +238,7 @@ jobs:
           
           echo "清理/mnt工作目录..."
           sudo rm -rf "$WORK_DIR"
-          sudo rm -rf /mnt/docker_tmp
+          # sudo rm -rf /mnt/docker_tmp
           
           echo "清理完成"
 
